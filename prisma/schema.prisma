@@ -1,0 +1,750 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ───
+
+enum BusinessPlan {
+  FREE
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  STAFF
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentType {
+  DEPOSIT
+  FULL
+}
+
+enum ChannelType {
+  VOICE
+  WHATSAPP
+  WEB_CHAT
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+// Mirrors LiveKit `CloseReason` plus business-semantic extensions (timeout,
+// transferred, etc). Persisted on Conversation.endedReason so the dashboard
+// can filter "show me dropped calls" or "show me transfers."
+enum ConversationEndedReason {
+  COMPLETED
+  USER_HANGUP
+  AGENT_HANGUP
+  PARTICIPANT_DISCONNECTED
+  ERROR
+  TIMEOUT
+  TRANSFERRED
+}
+
+enum NotificationType {
+  CONFIRMATION
+  REMINDER_24H
+  REMINDER_1H
+  CANCELLATION
+  FOLLOW_UP
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+  WHATSAPP
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum DepositType {
+  FIXED
+  PERCENTAGE
+}
+
+// ─── 1. Business (tenant) ───
+
+model Business {
+  id                 String       @id @default(uuid())
+  name               String
+  slug               String       @unique
+  email              String
+  phone              String?
+  address            String?
+  city               String?
+  state              String?
+  country            String       @default("MX")
+  timezone           String       @default("America/Mexico_City")
+  logoUrl            String?
+  website            String?
+  plan               BusinessPlan @default(FREE)
+  stripeCustomerId   String?      @unique
+  depositRequired    Boolean      @default(false)
+  depositType        DepositType?
+  depositAmount      Decimal?
+  cancellationPolicy String?
+  cancellationHours  Int          @default(24)
+  refundEnabled      Boolean      @default(true)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  deletedAt          DateTime?
+
+  users                User[]
+  staff                Staff[]
+  services             Service[]
+  customers            Customer[]
+  businessHours        BusinessHour[]
+  blockedTimes         BlockedTime[]
+  holidays             Holiday[]
+  appointments         Appointment[]
+  payments             Payment[]
+  conversations        Conversation[]
+  notifications        Notification[]
+  notificationSetting  NotificationSetting?
+  apiKeys              ApiKey[]
+  staffServices        StaffService[]
+  staffAvailabilities  StaffAvailability[]
+  messages             Message[]
+}
+
+// ─── 2. User (dashboard access) ───
+
+model User {
+  id        String    @id @default(uuid())
+  businessId String
+  business  Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  email     String    @unique
+  password  String
+  name      String
+  role      UserRole  @default(STAFF)
+  staffId   String?   @unique
+  staff     Staff?    @relation(fields: [staffId], references: [id])
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  refreshTokens RefreshToken[]
+
+  @@index([businessId])
+}
+
+// ─── 3. Staff ───
+
+model Staff {
+  id         String    @id @default(uuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  email      String?
+  phone      String?
+  bio        String?
+  avatarUrl  String?
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  user             User?
+  availabilities   StaffAvailability[]
+  blockedTimes     BlockedTime[]
+  staffServices    StaffService[]
+  appointments     Appointment[]
+
+  @@index([businessId])
+}
+
+// ─── 4. Service ───
+
+model Service {
+  id           String    @id @default(uuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  duration     Int
+  price        Decimal
+  currency     String    @default("MXN")
+  bufferBefore Int       @default(0)
+  bufferAfter  Int       @default(0)
+  // Slot grid granularity in minutes. Cal.com / Calendly / Acuity pattern:
+  // bookings must start at multiples of this (anchored to each business-
+  // hour window's start, not midnight). 15 is the industry default; 5
+  // for high-frequency services, 30 for long ones. Availability engine
+  // reads this same value so `/availability` slots and accepted
+  // `POST /appointments` times never drift out of sync.
+  slotIntervalMin Int    @default(15)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  staffServices StaffService[]
+  appointments  Appointment[]
+
+  @@index([businessId])
+}
+
+// ─── 5. StaffService (N:N) ───
+
+model StaffService {
+  id             String   @id @default(uuid())
+  staffId        String
+  staff          Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  serviceId      String
+  service        Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customDuration Int?
+  customPrice    Decimal?
+
+  @@unique([staffId, serviceId])
+  @@index([businessId])
+}
+
+// ─── 6. Customer ───
+
+model Customer {
+  id                     String    @id @default(uuid())
+  businessId             String
+  business               Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name                   String
+  phone                  String
+  email                  String?
+  notes                  String?
+  stripeCustomerId       String?
+  stripePaymentMethodId  String?
+  cardLast4              String?
+  cardBrand              String?
+  // Stripe-style `livemode` partition. Rows created by `agnt_test_*` keys
+  // land with `isTest = true`; live and test data never cross-reference
+  // (RLS policy + extension injection, see docs/prisma-quirks.md).
+  isTest                 Boolean   @default(false)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  deletedAt              DateTime?
+
+  appointments  Appointment[]
+  payments      Payment[]
+  conversations Conversation[]
+  notifications Notification[]
+
+  @@unique([businessId, isTest, phone])
+  @@index([businessId])
+  @@index([stripeCustomerId])
+}
+
+// ─── 7. BusinessHour ───
+
+model BusinessHour {
+  id         String    @id @default(uuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  dayOfWeek  DayOfWeek
+  startTime  String
+  endTime    String
+  isOpen     Boolean   @default(true)
+
+  // Multiple intervals per day allowed (e.g. lunch break 9-14, 16-20).
+  // Uniqueness of (dayOfWeek, startTime) is enforced at the service layer
+  // when replacing the full schedule.
+  @@index([businessId, dayOfWeek])
+}
+
+// ─── 8. StaffAvailability ───
+
+model StaffAvailability {
+  id         String    @id @default(uuid())
+  staffId    String
+  staff      Staff     @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  dayOfWeek  DayOfWeek
+  startTime  String
+  endTime    String
+  isActive   Boolean   @default(true)
+
+  @@unique([staffId, dayOfWeek])
+  @@index([businessId])
+}
+
+// ─── 9. BlockedTime ───
+
+model BlockedTime {
+  id         String    @id @default(uuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  staffId    String?
+  staff      Staff?    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  startTime  DateTime
+  endTime    DateTime
+  reason     String?
+  isAllDay   Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+
+  @@index([businessId])
+  @@index([staffId])
+  @@index([startTime, endTime])
+}
+
+// ─── 10. Holiday ───
+
+model Holiday {
+  id          String   @id @default(uuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  date        DateTime
+  name        String
+  isRecurring Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([businessId, date])
+}
+
+// ─── 11. Appointment ───
+
+model Appointment {
+  id                    String            @id @default(uuid())
+  businessId            String
+  business              Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customerId            String
+  customer              Customer          @relation(fields: [customerId], references: [id])
+  staffId               String
+  staff                 Staff             @relation(fields: [staffId], references: [id])
+  serviceId             String
+  service               Service           @relation(fields: [serviceId], references: [id])
+  status                AppointmentStatus @default(PENDING)
+  startTime             DateTime
+  endTime               DateTime
+  notes                 String?
+  channel               ChannelType
+  cancelledAt           DateTime?
+  cancellationReason    String?
+  cancelledByActorType  String?
+  source                String?
+  metadata              Json?
+  // Reschedule linkage (Cal.com-style): reschedule creates a NEW row and
+  // links it. The old row transitions to CANCELLED with reason "RESCHEDULED".
+  rescheduledFromId     String?           @unique
+  rescheduledFrom       Appointment?      @relation("Reschedule", fields: [rescheduledFromId], references: [id])
+  rescheduledTo         Appointment?      @relation("Reschedule")
+  isTest                Boolean           @default(false)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  deletedAt             DateTime?
+
+  payments      Payment[]
+  notifications Notification[]
+  conversation  Conversation?
+
+  @@index([businessId, startTime])
+  @@index([businessId, customerId])
+  @@index([businessId, staffId, startTime])
+  @@index([businessId, isTest, startTime(sort: Desc)])
+  @@index([status])
+}
+
+// ─── Idempotency (for POST /appointments, POST /appointments/:id/reschedule) ───
+
+model IdempotencyKey {
+  key          String   @id
+  businessId   String
+  method       String
+  path         String
+  requestHash  String
+  statusCode   Int?
+  responseBody Json?
+  resourceId   String?
+  isTest       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@index([businessId])
+  @@index([expiresAt])
+}
+
+// ─── Outbox events (post-commit side-effects) ───
+
+model OutboxEvent {
+  id          String    @id @default(uuid())
+  businessId  String
+  type        String
+  payload     Json
+  status      String    @default("PENDING") // PENDING | PROCESSED | FAILED
+  attempts    Int       @default(0)
+  processedAt DateTime?
+  isTest      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  @@index([status, createdAt])
+  @@index([businessId])
+}
+
+// ─── 12. Payment ───
+
+model Payment {
+  id                    String        @id @default(uuid())
+  businessId            String
+  business              Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointmentId         String
+  appointment           Appointment   @relation(fields: [appointmentId], references: [id])
+  customerId            String
+  customer              Customer      @relation(fields: [customerId], references: [id])
+  type                  PaymentType
+  amount                Decimal
+  currency              String        @default("MXN")
+  status                PaymentStatus @default(PENDING)
+  stripePaymentIntentId String?       @unique
+  stripeRefundId        String?
+  refundAmount          Decimal?
+  paymentMethod         String?
+  paidAt                DateTime?
+  metadata              Json?
+  isTest                Boolean       @default(false)
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([businessId])
+  @@index([appointmentId])
+  @@index([customerId])
+}
+
+// ─── 13. Conversation ───
+
+// Conversations represent a single inbound interaction (a phone call, a
+// WhatsApp thread, a web-chat session). The agent calls
+// `POST /conversations` at start, `POST /conversations/:id/messages` per
+// turn, `POST /conversations/:id/close` at end. Late messages after close
+// are accepted with HTTP 202 + metadata.lateArrival=true (STT
+// finalisations frequently arrive after hangup — rejecting them loses
+// the last user utterance).
+model Conversation {
+  id            String       @id @default(uuid())
+  businessId    String
+  business      Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customerId    String?
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  appointmentId String?      @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  channel       ChannelType
+
+  // Lifecycle
+  startedAt     DateTime                 @default(now())
+  endedAt       DateTime?
+  duration      Int?                     // milliseconds (set on close)
+  endedReason   ConversationEndedReason?
+
+  // External correlation — lets support pivot from a LiveKit room name /
+  // Twilio CallSid back to the stored conversation in one query.
+  livekitRoomName  String?  @unique
+  livekitSessionId String?
+  externalCallId   String?  // Twilio CallSid, Vapi callId, etc.
+
+  // Recording (D74 — column kept for forward-compat; not yet populated)
+  recordingUrl        String?
+  recordingDurationMs Int?
+
+  // Per-conversation rollups, computed on `/close`. Per-message granular
+  // counts live on Message; rollups stay cheap for dashboard list views.
+  totalInputTokens  Int      @default(0)
+  totalOutputTokens Int      @default(0)
+  totalCachedTokens Int      @default(0)
+  sttAudioSeconds   Float    @default(0)
+  ttsCharacters     Int      @default(0)
+  totalCostUsd      Decimal? @db.Decimal(10, 6)
+  messageCount      Int      @default(0)
+
+  // Quality / triage flags
+  hasError    Boolean @default(false)
+  errorReason String?
+
+  isTest    Boolean  @default(false)
+  summary   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+
+  // Composite indexes mirror the dashboard list patterns:
+  //   `WHERE businessId=? ORDER BY startedAt DESC LIMIT N` (cursor pages)
+  //   `WHERE businessId=? AND channel=? ORDER BY startedAt DESC`
+  //   `WHERE businessId=? AND endedReason=?`
+  @@index([businessId, startedAt(sort: Desc)])
+  @@index([businessId, channel, startedAt(sort: Desc)])
+  @@index([businessId, endedReason])
+  @@index([businessId, isTest, startedAt(sort: Desc)])
+  @@index([customerId])
+}
+
+// ─── 14. Message ───
+
+// One row = one turn (user utterance, assistant response, or tool result).
+// Telemetry columns follow the OpenTelemetry GenAI semantic conventions
+// (still Development/experimental as of late 2025) so when OTel lands the
+// mapping is a 1:1 rename rather than a reshape.
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  businessId     String
+  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  // Caller-supplied monotonic index. Reorders happen normally in voice
+  // pipelines (a tool result can arrive before the assistant text that
+  // referenced it) so we accept and resort on read instead of rejecting.
+  // The unique constraint catches duplicate retries.
+  turnIndex       Int
+  clientTimestamp DateTime
+
+  role            MessageRole
+  content         String  @db.Text
+  contentRedacted Boolean @default(false)
+
+  // Tool-calling — JSON for forward-compat with provider variations.
+  // `toolCalls` shape: [{id, name, arguments}] (OpenAI shape).
+  // `toolCallId` links a TOOL-role result back to the assistant's tool call.
+  toolCalls  Json?
+  toolCallId String?
+
+  // Voice fields. Audio per-turn is stored in object storage (D74); URL
+  // here is signed, short-TTL.
+  audioUrl        String?
+  audioDurationMs Int?
+  interrupted     Boolean @default(false)
+
+  // OpenTelemetry GenAI alignment (gen_ai.* attributes):
+  //   providerName  → gen_ai.provider.name   ("openai", "anthropic", "elevenlabs")
+  //   requestModel  → gen_ai.request.model
+  //   responseModel → gen_ai.response.model
+  //   *Tokens       → gen_ai.usage.{input,output}_tokens
+  //   finishReason  → gen_ai.response.finish_reasons[0]
+  //   ttftMs        → time-to-first-token, milliseconds
+  //   latencyMs     → full turn duration, milliseconds
+  providerName      String?
+  requestModel      String?
+  responseModel     String?
+  inputTokens       Int?
+  outputTokens      Int?
+  cachedInputTokens Int?
+  finishReason      String?
+  ttftMs            Int?
+  latencyMs         Int?
+  costUsd           Decimal? @db.Decimal(10, 6)
+
+  isTest    Boolean  @default(false)
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@unique([conversationId, turnIndex])
+  @@index([conversationId, turnIndex])
+  @@index([businessId, createdAt(sort: Desc)])
+}
+
+// ─── 15. Notification ───
+
+model Notification {
+  id            String              @id @default(uuid())
+  businessId    String
+  business      Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointmentId String
+  appointment   Appointment         @relation(fields: [appointmentId], references: [id])
+  customerId    String
+  customer      Customer            @relation(fields: [customerId], references: [id])
+  type          NotificationType
+  channel       NotificationChannel
+  status        NotificationStatus  @default(PENDING)
+  scheduledAt   DateTime
+  sentAt        DateTime?
+  failReason    String?
+  bullmqJobId   String?
+  isTest        Boolean             @default(false)
+  createdAt     DateTime            @default(now())
+
+  @@index([businessId])
+  @@index([appointmentId])
+  @@index([status, scheduledAt])
+}
+
+// ─── 16. NotificationSetting ───
+
+model NotificationSetting {
+  id                   String              @id @default(uuid())
+  businessId           String              @unique
+  business             Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  reminder24hEnabled   Boolean             @default(true)
+  reminder1hEnabled    Boolean             @default(true)
+  confirmationEnabled  Boolean             @default(true)
+  cancellationEnabled  Boolean             @default(true)
+  followUpEnabled      Boolean             @default(false)
+  preferredChannel     NotificationChannel @default(WHATSAPP)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+}
+
+// ─── 17. ApiKey ───
+//
+// Format (GitHub 2021 inspired): `agnt_<env>_<32-byte-base62><6-char-CRC32>`.
+// Example: `agnt_live_3kJ8mP2qN7vR9xL4tBcF6yHwZdAeQs5g7uVnM3pK1jXr2H`.
+// Stored as SHA-256 hash (no bcrypt — keys are 178+ bits of entropy, slow
+// hash adds latency without security gain). Prefix + last4 are kept in
+// plaintext for UI / audit; the full plaintext is shown ONCE at creation.
+
+model ApiKey {
+  id           String    @id @default(uuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name         String
+  keyHash      String    @unique
+  prefix       String    // e.g. "agnt_live_3kJ8mP2q" — first 18 chars
+  last4        String    // e.g. "p1jX" — for UI disambiguation
+  createdById  String?   // OWNER who minted the key
+  expiresAt    DateTime?
+  // Soft-delete + forensics: never hard-delete revoked keys.
+  revokedAt    DateTime?
+  revokedById  String?
+  // Per-key telemetry — written from the auth guard with backoff (only
+  // updated if >60s stale) to avoid hot-row contention under agent load.
+  lastUsedAt   DateTime?
+  lastUsedIp   String?
+  lastUsedUa   String?
+  callCount    Int       @default(0)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+
+  @@index([businessId, revokedAt])
+}
+
+// ─── 18. RefreshToken ───
+
+// Refresh token chain (Supabase-style family/parent pattern).
+//
+// Family = browser session = device. Each `/auth/login` creates a new
+// `familyId`; subsequent rotations link via `parentId`. Reuse detection:
+// if a parent token is presented after rotation AND outside the grace
+// window, the entire family is revoked (compromise signal — RFC 9700
+// §4.14 mandate for public clients).
+//
+// `tokenHash` is SHA-256 + a server-side `JWT_SECRET`-derived pepper —
+// not argon2. Refresh tokens are 256-bit random opaque strings; a slow
+// hash adds latency without any security gain at that entropy.
+model RefreshToken {
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  businessId        String                                    // tenant scoping for /auth/sessions
+  tokenHash         String    @unique                         // O(1) lookup; replaces findMany+verify loop
+
+  // Family / chain
+  familyId          String                                    // = session id; immutable across rotations
+  parentId          String?                                   // self-FK forms the chain (audit trail)
+  parent            RefreshToken?  @relation("Chain", fields: [parentId], references: [id])
+  children          RefreshToken[] @relation("Chain")
+
+  // Lifecycle
+  expiresAt         DateTime                                  // sliding: now + 30d on each issue
+  absoluteExpiresAt DateTime                                  // hard cap: familyCreated + 90d
+  revokedAt         DateTime?                                 // rotated OR family-killed
+  replacedAt        DateTime?                                 // when a child was minted from this row
+  reusedAt          DateTime?                                 // when reuse was detected on this row
+
+  // Per-device session metadata (populated on first issuance per family)
+  userAgent         String?
+  ip                String?
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([userId, revokedAt])              // active-per-user (sessions list)
+  @@index([familyId])                       // family revoke
+  @@index([businessId])
+}
+
+// ─── 19. AuditEvent (append-only) ───
+//
+// Forensic / dispute-resolution / SOC 2 audit trail. Insert-only via
+// the app role (REVOKE UPDATE/DELETE applied in migration); a trigger
+// raises EXCEPTION on any mutation attempt as belt + suspenders.
+//
+// Captured by `@Audit('action.name')` decorator + AuditInterceptor
+// which writes via `registerAfterCommit` — the row only exists if the
+// underlying mutation actually committed. Failure path writes
+// `outcome: 'failure'` outside the rolled-back tx so attempts are
+// visible.
+
+model AuditEvent {
+  id             String   @id // ULID — time-ordered, cursor-friendly
+  businessId     String
+  occurredAt     DateTime @default(now())
+
+  actorType      String   // 'user' | 'api_key' | 'system'
+  actorId        String?
+  actorLabel     String?
+  authMethod     String?
+  apiKeyId       String?
+
+  action         String   // dotted verb, e.g. 'appointment.cancelled'
+  targetType     String
+  targetId       String
+
+  changes        Json?    // [{field, from, to}]
+  snapshotBefore Json?
+  snapshotAfter  Json?
+  outcome        String   @default("success") // 'success' | 'failure'
+  errorCode      String?
+
+  traceId        String?
+  requestId      String?
+  ipAddress      String?
+  userAgent      String?
+  isTest         Boolean  @default(false)
+
+  @@index([businessId, targetType, targetId, occurredAt(sort: Desc)])
+  @@index([businessId, actorId, occurredAt(sort: Desc)])
+  @@index([businessId, action, occurredAt(sort: Desc)])
+  @@index([businessId, isTest, occurredAt(sort: Desc)])
+}

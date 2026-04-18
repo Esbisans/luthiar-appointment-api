@@ -1,0 +1,21 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "roots": ["<rootDir>/test"],
+  "testEnvironment": "node",
+  "testRegex": ".*\\.e2e-spec\\.ts$",
+  "transform": {
+    "^.+\\.ts$": ["ts-jest", {
+      "tsconfig": {
+        "module": "commonjs",
+        "moduleResolution": "node",
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "resolvePackageJsonExports": false,
+        "resolvePackageJsonImports": false
+      }
+    }]
+  },
+  "testTimeout": 30000,
+  "maxWorkers": 1
+}
